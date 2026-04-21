@@ -33,17 +33,17 @@ Chapter -> Class/Function mapping:
 REPL commands: /compact /tasks /team /inbox
 """
 
-# 导入必要的库
+# Import necessary libraries
 import json
 import os
 import uuid
 from pathlib import Path
 
-# 导入 Anthropic 客户端和环境变量加载器
+# Import Anthropic client and environment variable loader
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
-# 导入模块
+# Import modules
 from src.modules.persisted_output import maybe_persist_output
 from src.modules.base_tools import run_bash, run_read, run_write, run_edit
 from src.modules.todos import TodoManager
@@ -58,46 +58,46 @@ from src.modules.agent_loop import agent_loop
 from src.modules.worktree_task_isolation import EventBus, TaskManager as WorktreeTaskManager, WorktreeManager, detect_repo_root, get_worktree_tools
 from src.modules.mcp_plugin import CapabilityPermissionGate, MCPClient, PluginLoader, MCPToolRouter, normalize_tool_result, get_mcp_tools
 
-# 加载环境变量，覆盖已有的环境变量
+# Load environment variables, override existing ones
 load_dotenv(override=True)
-# 如果设置了 ANTHROPIC_BASE_URL，则移除 ANTHROPIC_AUTH_TOKEN
+# If ANTHROPIC_BASE_URL is set, remove ANTHROPIC_AUTH_TOKEN
 if os.getenv("ANTHROPIC_BASE_URL"):
     os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
-# 工作目录设置
+# Working directory setup
 WORKDIR = Path.cwd()
-# 创建 Anthropic 客户端实例
+# Create Anthropic client instance
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-# 从环境变量获取模型 ID
+# Get model ID from environment variables
 MODEL = os.environ["MODEL_ID"]
 
-# 技能目录
+# Skills directory
 SKILLS_DIR = WORKDIR / "skills"
 
-# 有效的消息类型
+# Valid message types
 VALID_MSG_TYPES = {"message", "broadcast", "shutdown_request",
                    "shutdown_response", "plan_approval_response"}
 
 
 # === SECTION: shutdown + plan tracking (s10) ===
-# 关闭请求字典，用于跟踪关闭请求状态
+# Shutdown request dictionary, for tracking shutdown request status
 shutdown_requests = {}
-# 计划请求字典，用于跟踪计划审批状态
+# Plan request dictionary, for tracking plan approval status
 plan_requests = {}
 
 
 # === SECTION: global_instances ===
-# 全局待办事项管理器实例
+# Global todo manager instance
 TODO = TodoManager()
-# 全局技能加载器实例
+# Global skill loader instance
 SKILLS = SkillLoader(SKILLS_DIR)
-# 全局任务管理器实例
+# Global task manager instance
 TASK_MGR = TaskManager()
-# 全局后台任务管理器实例
+# Global background task manager instance
 BG = BackgroundManager()
-# 全局消息总线实例
+# Global message bus instance
 BUS = MessageBus()
-# 全局团队成员管理器实例
+# Global teammate manager instance
 TEAM = TeammateManager(BUS, TASK_MGR, client, MODEL)
 
 # s18: Worktree Task Isolation
@@ -112,7 +112,7 @@ mcp_router = MCPToolRouter()
 plugin_loader = PluginLoader()
 
 # === SECTION: system_prompt ===
-# 系统提示，定义代理的行为和可用工具
+# System prompt, defines agent behavior and available tools
 SYSTEM = f"""You are a coding agent at {WORKDIR}. Use tools to solve tasks.
 Prefer task_create/task_update/task_list for multi-step work. Use TodoWrite for short checklists.
 Use task for subagent delegation. Use load_skill for specialized knowledge.
@@ -120,86 +120,86 @@ Skills: {SKILLS.descriptions()}"""
 
 
 # === SECTION: shutdown_protocol (s10) ===
-# 处理关闭请求
-# 输入: teammate - 团队成员名称
-# 输出: 关闭请求发送确认
+# Handle shutdown requests
+# Input: teammate - team member name
+# Output: shutdown request sent confirmation
 
 def handle_shutdown_request(teammate: str) -> str:
-    # 生成请求 ID
+    # Generate request ID
     req_id = str(uuid.uuid4())[:8]
-    # 记录关闭请求
+    # Record shutdown request
     shutdown_requests[req_id] = {"target": teammate, "status": "pending"}
-    # 发送关闭请求消息
+    # Send shutdown request message
     BUS.send("lead", teammate, "Please shut down.", "shutdown_request", {"request_id": req_id})
-    # 返回发送确认
+    # Return send confirmation
     return f"Shutdown request {req_id} sent to '{teammate}'"
 
 # === SECTION: plan_approval (s10) ===
-# 处理计划审批
-# 输入: request_id - 请求 ID, approve - 是否批准, feedback - 反馈信息
-# 输出: 审批结果确认
+# Handle plan approvals
+# Input: request_id - request ID, approve - whether to approve, feedback - feedback information
+# Output: approval result confirmation
 
 def handle_plan_review(request_id: str, approve: bool, feedback: str = "") -> str:
-    # 获取计划请求
+    # Get plan request
     req = plan_requests.get(request_id)
     if not req: return f"Error: Unknown plan request_id '{request_id}'"
-    # 更新请求状态
+    # Update request status
     req["status"] = "approved" if approve else "rejected"
-    # 发送审批响应
+    # Send approval response
     BUS.send("lead", req["from"], feedback, "plan_approval_response",
              {"request_id": request_id, "approve": approve, "feedback": feedback})
-    # 返回审批结果
+    # Return approval result
     return f"Plan {req['status']} for '{req['from']}'"
 
 
 # === SECTION: tool_dispatch (s02) ===
-# 工具处理函数映射
+# Tool handler function mapping
 TOOL_HANDLERS = {
-    "bash":             lambda **kw: run_bash(kw["command"], kw.get("tool_use_id", "")),             # 运行 bash 命令
-    "read_file":        lambda **kw: run_read(kw["path"], kw.get("tool_use_id", ""), kw.get("limit")), # 读取文件
-    "write_file":       lambda **kw: run_write(kw["path"], kw["content"]),                             # 写入文件
-    "edit_file":        lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),           # 编辑文件
-    "TodoWrite":        lambda **kw: TODO.update(kw["items"]),                                          # 更新待办事项
-    "task":             lambda **kw: run_subagent(client, MODEL, kw["prompt"], kw.get("agent_type", "Explore")),    # 运行子代理
-    "load_skill":       lambda **kw: SKILLS.load(kw["name"]),                                           # 加载技能
-    "compress":         lambda **kw: "Compressing...",                                                   # 压缩上下文
-    "background_run":   lambda **kw: BG.run(kw["command"], kw.get("timeout", 120)),                   # 后台运行命令
-    "check_background": lambda **kw: BG.check(kw.get("task_id")),                                        # 检查后台任务
-    "task_create":      lambda **kw: TASK_MGR.create(kw["subject"], kw.get("description", "")),       # 创建任务
-    "task_get":         lambda **kw: TASK_MGR.get(kw["task_id"]),                                       # 获取任务
-    "task_update":      lambda **kw: TASK_MGR.update(kw["task_id"], kw.get("status"), kw.get("add_blocked_by"), kw.get("add_blocks")), # 更新任务
-    "task_list":        lambda **kw: TASK_MGR.list_all(),                                                # 列出所有任务
-    "spawn_teammate":   lambda **kw: TEAM.spawn(kw["name"], kw["role"], kw["prompt"]),              # 生成团队成员
-    "list_teammates":   lambda **kw: TEAM.list_all(),                                                   # 列出所有团队成员
-    "send_message":     lambda **kw: BUS.send("lead", kw["to"], kw["content"], kw.get("msg_type", "message")), # 发送消息
-    "read_inbox":       lambda **kw: json.dumps(BUS.read_inbox("lead"), indent=2),                      # 读取收件箱
-    "broadcast":        lambda **kw: BUS.broadcast("lead", kw["content"], TEAM.member_names()),       # 广播消息
-    "shutdown_request": lambda **kw: handle_shutdown_request(kw["teammate"]),                          # 发送关闭请求
-    "plan_approval":    lambda **kw: handle_plan_review(kw["request_id"], kw["approve"], kw.get("feedback", "")), # 处理计划审批
-    "idle":             lambda **kw: "Lead does not idle.",                                             # 空闲状态（领导不空闲）
-    "claim_task":       lambda **kw: TASK_MGR.claim(kw["task_id"], "lead"),                            # 认领任务
+    "bash":             lambda **kw: run_bash(kw["command"], kw.get("tool_use_id", "")),             # Run bash command
+    "read_file":        lambda **kw: run_read(kw["path"], kw.get("tool_use_id", ""), kw.get("limit")), # Read file
+    "write_file":       lambda **kw: run_write(kw["path"], kw["content"]),                             # Write file
+    "edit_file":        lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),           # Edit file
+    "TodoWrite":        lambda **kw: TODO.update(kw["items"]),                                          # Update todo list
+    "task":             lambda **kw: run_subagent(client, MODEL, kw["prompt"], kw.get("agent_type", "Explore")),    # Run subagent
+    "load_skill":       lambda **kw: SKILLS.load(kw["name"]),                                           # Load skill
+    "compress":         lambda **kw: "Compressing...",                                                   # Compress context
+    "background_run":   lambda **kw: BG.run(kw["command"], kw.get("timeout", 120)),                   # Run command in background
+    "check_background": lambda **kw: BG.check(kw.get("task_id")),                                        # Check background task
+    "task_create":      lambda **kw: TASK_MGR.create(kw["subject"], kw.get("description", "")),       # Create task
+    "task_get":         lambda **kw: TASK_MGR.get(kw["task_id"]),                                       # Get task
+    "task_update":      lambda **kw: TASK_MGR.update(kw["task_id"], kw.get("status"), kw.get("add_blocked_by"), kw.get("add_blocks")), # Update task
+    "task_list":        lambda **kw: TASK_MGR.list_all(),                                                # List all tasks
+    "spawn_teammate":   lambda **kw: TEAM.spawn(kw["name"], kw["role"], kw["prompt"]),              # Spawn teammate
+    "list_teammates":   lambda **kw: TEAM.list_all(),                                                   # List all teammates
+    "send_message":     lambda **kw: BUS.send("lead", kw["to"], kw["content"], kw.get("msg_type", "message")), # Send message
+    "read_inbox":       lambda **kw: json.dumps(BUS.read_inbox("lead"), indent=2),                      # Read inbox
+    "broadcast":        lambda **kw: BUS.broadcast("lead", kw["content"], TEAM.member_names()),       # Broadcast message
+    "shutdown_request": lambda **kw: handle_shutdown_request(kw["teammate"]),                          # Send shutdown request
+    "plan_approval":    lambda **kw: handle_plan_review(kw["request_id"], kw["approve"], kw.get("feedback", "")), # Handle plan approval
+    "idle":             lambda **kw: "Lead does not idle.",                                             # Idle state (lead does not idle)
+    "claim_task":       lambda **kw: TASK_MGR.claim(kw["task_id"], "lead"),                            # Claim task
     
     # s18: Worktree Task Isolation tools
-    "worktree_task_create":      lambda **kw: TASKS.create(kw["subject"], kw.get("description", "")),          # 创建工作树任务
-    "worktree_task_list":        lambda **kw: TASKS.list_all(),                                                   # 列出所有工作树任务
-    "worktree_task_get":         lambda **kw: TASKS.get(kw["task_id"]),                                          # 获取工作树任务
-    "worktree_task_update":      lambda **kw: TASKS.update(kw["task_id"], kw.get("status"), kw.get("owner")),  # 更新工作树任务
-    "worktree_task_bind":        lambda **kw: TASKS.bind_worktree(kw["task_id"], kw["worktree"], kw.get("owner", "")), # 绑定工作树
-    "worktree_create":           lambda **kw: WORKTREES.create(kw["name"], kw.get("task_id"), kw.get("base_ref", "HEAD")), # 创建工作树
-    "worktree_list":             lambda **kw: WORKTREES.list_all(),                                               # 列出所有工作树
-    "worktree_enter":            lambda **kw: WORKTREES.enter(kw["name"]),                                      # 进入工作树
-    "worktree_status":           lambda **kw: WORKTREES.status(kw["name"]),                                     # 检查工作树状态
-    "worktree_run":              lambda **kw: WORKTREES.run(kw["name"], kw["command"]),                         # 在工作树中运行命令
-    "worktree_closeout":         lambda **kw: WORKTREES.closeout(kw["name"], kw["action"], kw.get("reason", ""), kw.get("force", False), kw.get("complete_task", False)), # 关闭工作树
-    "worktree_remove":           lambda **kw: WORKTREES.remove(kw["name"], kw.get("force", False), kw.get("complete_task", False), kw.get("reason", "")), # 删除工作树
-    "worktree_keep":             lambda **kw: WORKTREES.keep(kw["name"]),                                        # 保留工作树
-    "worktree_events":           lambda **kw: EVENTS.list_recent(kw.get("limit", 20)),                             # 列出工作树事件
+    "worktree_task_create":      lambda **kw: TASKS.create(kw["subject"], kw.get("description", "")),          # Create worktree task
+    "worktree_task_list":        lambda **kw: TASKS.list_all(),                                                   # List all worktree tasks
+    "worktree_task_get":         lambda **kw: TASKS.get(kw["task_id"]),                                          # Get worktree task
+    "worktree_task_update":      lambda **kw: TASKS.update(kw["task_id"], kw.get("status"), kw.get("owner")),  # Update worktree task
+    "worktree_task_bind":        lambda **kw: TASKS.bind_worktree(kw["task_id"], kw["worktree"], kw.get("owner", "")), # Bind worktree
+    "worktree_create":           lambda **kw: WORKTREES.create(kw["name"], kw.get("task_id"), kw.get("base_ref", "HEAD")), # Create worktree
+    "worktree_list":             lambda **kw: WORKTREES.list_all(),                                               # List all worktrees
+    "worktree_enter":            lambda **kw: WORKTREES.enter(kw["name"]),                                      # Enter worktree
+    "worktree_status":           lambda **kw: WORKTREES.status(kw["name"]),                                     # Check worktree status
+    "worktree_run":              lambda **kw: WORKTREES.run(kw["name"], kw["command"]),                         # Run command in worktree
+    "worktree_closeout":         lambda **kw: WORKTREES.closeout(kw["name"], kw["action"], kw.get("reason", ""), kw.get("force", False), kw.get("complete_task", False)), # Close out worktree
+    "worktree_remove":           lambda **kw: WORKTREES.remove(kw["name"], kw.get("force", False), kw.get("complete_task", False), kw.get("reason", "")), # Remove worktree
+    "worktree_keep":             lambda **kw: WORKTREES.keep(kw["name"]),                                        # Keep worktree
+    "worktree_events":           lambda **kw: EVENTS.list_recent(kw.get("limit", 20)),                             # List worktree events
     
     # s19: MCP Plugin System tools
-    "mcp_call":                  lambda **kw: mcp_router.call(kw["tool_name"], kw["arguments"]),                 # 调用MCP工具
+    "mcp_call":                  lambda **kw: mcp_router.call(kw["tool_name"], kw["arguments"]),                 # Call MCP tool
 }
 
-# 工具定义列表
+# Tool definition list
 TOOLS = [
     {"name": "bash", "description": "Run a shell command.",
      "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
@@ -285,9 +285,9 @@ TOOLS = [
 
 
 # === SECTION: repl ===
-# 主程序入口
+# Main program entry point
 if __name__ == "__main__":
-    # s19: 扫描插件并连接MCP服务器
+    # s19: Scan for plugins and connect to MCP servers
     found_plugins = plugin_loader.scan()
     if found_plugins:
         print(f"[Plugins loaded: {', '.join(found_plugins)}]")
@@ -298,41 +298,41 @@ if __name__ == "__main__":
                 mcp_router.register_client(mcp_client)
                 print(f"[MCP] Connected to {server_name}")
     
-    # 初始化历史消息列表
+    # Initialize history message list
     history = []
     while True:
         try:
-            # 读取用户输入
+            # Read user input
             query = input("\033[36ms_full >> \033[0m")
         except (EOFError, KeyboardInterrupt):
-            # 处理 EOF 或键盘中断
+            # Handle EOF or keyboard interrupt
             break
-        # 处理退出命令
+        # Handle exit command
         if query.strip().lower() in ("q", "exit", ""):
             break
-        # 处理 /compact 命令：手动压缩上下文
+        # Handle /compact command: manually compress context
         if query.strip() == "/compact":
             if history:
                 print("[manual compact via /compact]")
                 history[:] = auto_compact(client, MODEL, history)
             continue
-        # 处理 /tasks 命令：列出所有任务
+        # Handle /tasks command: list all tasks
         if query.strip() == "/tasks":
             print(TASK_MGR.list_all())
             continue
-        # 处理 /team 命令：列出所有团队成员
+        # Handle /team command: list all teammates
         if query.strip() == "/team":
             print(TEAM.list_all())
             continue
-        # 处理 /inbox 命令：读取领导收件箱
+        # Handle /inbox command: read lead's inbox
         if query.strip() == "/inbox":
             print(json.dumps(BUS.read_inbox("lead"), indent=2))
             continue
-        # 处理 /worktree 命令：列出所有工作树
+        # Handle /worktree command: list all worktrees
         if query.strip() == "/worktree":
             print(WORKTREES.list_all())
             continue
-        # 处理 /mcp 命令：列出所有MCP服务器和工具
+        # Handle /mcp command: list all MCP servers and tools
         if query.strip() == "/mcp":
             if mcp_router.clients:
                 for name, c in mcp_router.clients.items():
@@ -341,12 +341,12 @@ if __name__ == "__main__":
             else:
                 print("  (no MCP servers connected)")
             continue
-        # 添加用户输入到历史消息
+        # Add user input to history messages
         history.append({"role": "user", "content": query})
-        # 运行代理循环
+        # Run agent loop
         agent_loop(client, MODEL, history, TODO, BG, BUS, TOOL_HANDLERS, TOOLS, SYSTEM)
-        # 打印空行
+        # Print empty line
         print()
     
-    # 清理MCP连接
+    # Clean up MCP connections
     mcp_router.disconnect_all()
