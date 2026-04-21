@@ -1,37 +1,53 @@
 #!/usr/bin/env python3
 # Harness: all mechanisms combined -- the complete cockpit for the model.
 """
-s_full.py - Capstone Teaching Agent
+main.py - 综合智能代理系统
 
-Capstone file that combines the core local mechanisms taught across
-`s01-s18` into one runnable agent.
+该文件是一个综合智能代理系统，整合了s01-s19的核心机制，包括：
+- 代理循环
+- 工具调度
+- 待办事项管理
+- 子代理运行
+- 技能加载
+- 上下文压缩
+- 权限管理
+- 钩子系统
+- 内存管理
+- 系统提示
+- 错误恢复
+- 任务系统
+- 后台任务
+- 定时调度
+- 代理团队
+- 团队协议
+- 自主运行
+- 工作树隔离
+- MCP插件系统
 
-`s19` (MCP / plugin integration) is still taught as a separate chapter,
-because external tool connectivity is easier to understand after the local
-core is already stable.
+章节 -> 类/函数映射：
+  s01 代理循环     -> agent_loop()
+  s02 工具调度     -> TOOL_HANDLERS
+  s03 待办事项     -> TodoManager
+  s04 子代理       -> run_subagent()
+  s05 技能加载     -> SkillLoader
+  s06 上下文压缩   -> auto_compact()
+  s07 权限管理     -> CapabilityPermissionGate
+  s08 钩子系统     -> 集成在各个模块中
+  s09 内存管理     -> 集成在各个模块中
+  s10 系统提示     -> SYSTEM 变量
+  s11 错误恢复     -> agent_loop() 中的恢复逻辑
+  s12 任务系统     -> TaskManager
+  s13 后台任务     -> BackgroundManager
+  s14 定时调度     -> 集成在后台任务中
+  s15 代理团队     -> TeammateManager, MessageBus
+  s16 团队协议     -> shutdown_requests, plan_requests 字典
+  s17 自主运行     -> 集成在团队模块中
+  s18 工作树隔离   -> WorktreeManager
+  s19 MCP插件系统  -> MCPToolRouter
 
-Chapter -> Class/Function mapping:
-  s01 Agent Loop     -> agent_loop()
-  s02 Tool Dispatch  -> TOOL_HANDLERS, normalize_messages()
-  s03 TodoWrite      -> TodoManager
-  s04 Subagent       -> run_subagent()
-  s05 Skill Loading  -> SkillLoader
-  s06 Context Compact-> maybe_persist_output(), micro_compact(), auto_compact()
-  s07 Permissions    -> PermissionManager
-  s08 Hooks          -> HookManager
-  s09 Memory         -> MemoryManager
-  s10 System Prompt  -> build_system_prompt()
-  s11 Error Recovery -> recovery logic inside agent_loop()
-  s12 Task System    -> TaskManager
-  s13 Background     -> BackgroundManager
-  s14 Cron Scheduler -> CronScheduler
-  s15 Agent Teams    -> TeammateManager, MessageBus
-  s16 Team Protocols -> shutdown_requests, plan_requests dicts
-  s17 Autonomous     -> _idle_poll(), scan_unclaimed_tasks()
-  s18 Worktree       -> WorktreeManager
-
-REPL commands: /compact /tasks /team /inbox
+REPL 命令：/compact /tasks /team /inbox /worktree /mcp
 """
+
 
 # 导入必要的库
 import json
