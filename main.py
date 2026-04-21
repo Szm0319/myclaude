@@ -1,37 +1,53 @@
 #!/usr/bin/env python3
 # Harness: all mechanisms combined -- the complete cockpit for the model.
 """
-s_full.py - Capstone Teaching Agent
+main.py - 综合智能代理系统
 
-Capstone file that combines the core local mechanisms taught across
-`s01-s18` into one runnable agent.
+该文件是一个综合智能代理系统，整合了s01-s19的核心机制，包括：
+- 代理循环
+- 工具调度
+- 待办事项管理
+- 子代理运行
+- 技能加载
+- 上下文压缩
+- 权限管理
+- 钩子系统
+- 内存管理
+- 系统提示
+- 错误恢复
+- 任务系统
+- 后台任务
+- 定时调度
+- 代理团队
+- 团队协议
+- 自主运行
+- 工作树隔离
+- MCP插件系统
 
-`s19` (MCP / plugin integration) is still taught as a separate chapter,
-because external tool connectivity is easier to understand after the local
-core is already stable.
+章节 -> 类/函数映射：
+  s01 代理循环     -> agent_loop()
+  s02 工具调度     -> TOOL_HANDLERS
+  s03 待办事项     -> TodoManager
+  s04 子代理       -> run_subagent()
+  s05 技能加载     -> SkillLoader
+  s06 上下文压缩   -> auto_compact()
+  s07 权限管理     -> CapabilityPermissionGate
+  s08 钩子系统     -> 集成在各个模块中
+  s09 内存管理     -> 集成在各个模块中
+  s10 系统提示     -> SYSTEM 变量
+  s11 错误恢复     -> agent_loop() 中的恢复逻辑
+  s12 任务系统     -> TaskManager
+  s13 后台任务     -> BackgroundManager
+  s14 定时调度     -> 集成在后台任务中
+  s15 代理团队     -> TeammateManager, MessageBus
+  s16 团队协议     -> shutdown_requests, plan_requests 字典
+  s17 自主运行     -> 集成在团队模块中
+  s18 工作树隔离   -> WorktreeManager
+  s19 MCP插件系统  -> MCPToolRouter
 
-Chapter -> Class/Function mapping:
-  s01 Agent Loop     -> agent_loop()
-  s02 Tool Dispatch  -> TOOL_HANDLERS, normalize_messages()
-  s03 TodoWrite      -> TodoManager
-  s04 Subagent       -> run_subagent()
-  s05 Skill Loading  -> SkillLoader
-  s06 Context Compact-> maybe_persist_output(), micro_compact(), auto_compact()
-  s07 Permissions    -> PermissionManager
-  s08 Hooks          -> HookManager
-  s09 Memory         -> MemoryManager
-  s10 System Prompt  -> build_system_prompt()
-  s11 Error Recovery -> recovery logic inside agent_loop()
-  s12 Task System    -> TaskManager
-  s13 Background     -> BackgroundManager
-  s14 Cron Scheduler -> CronScheduler
-  s15 Agent Teams    -> TeammateManager, MessageBus
-  s16 Team Protocols -> shutdown_requests, plan_requests dicts
-  s17 Autonomous     -> _idle_poll(), scan_unclaimed_tasks()
-  s18 Worktree       -> WorktreeManager
-
-REPL commands: /compact /tasks /team /inbox
+REPL 命令：/compact /tasks /team /inbox /worktree /mcp
 """
+
 
 # 导入必要的库
 import json
@@ -55,6 +71,8 @@ from src.modules.background import BackgroundManager
 from src.modules.messaging import MessageBus
 from src.modules.team import TeammateManager
 from src.modules.agent_loop import agent_loop
+from src.modules.worktree_task_isolation import EventBus, TaskManager as WorktreeTaskManager, WorktreeManager, detect_repo_root, get_worktree_tools
+from src.modules.mcp_plugin import CapabilityPermissionGate, MCPClient, PluginLoader, MCPToolRouter, normalize_tool_result, get_mcp_tools
 
 # 加载环境变量，覆盖已有的环境变量
 load_dotenv(override=True)
@@ -97,6 +115,17 @@ BG = BackgroundManager()
 BUS = MessageBus()
 # 全局团队成员管理器实例
 TEAM = TeammateManager(BUS, TASK_MGR, client, MODEL)
+
+# s18: Worktree Task Isolation
+REPO_ROOT = detect_repo_root(WORKDIR) or WORKDIR
+TASKS = WorktreeTaskManager(REPO_ROOT / ".tasks")
+EVENTS = EventBus(REPO_ROOT / ".worktrees" / "events.jsonl")
+WORKTREES = WorktreeManager(REPO_ROOT, TASKS, EVENTS)
+
+# s19: MCP Plugin System
+permission_gate = CapabilityPermissionGate()
+mcp_router = MCPToolRouter()
+plugin_loader = PluginLoader()
 
 # === SECTION: system_prompt ===
 # 系统提示，定义代理的行为和可用工具
@@ -165,6 +194,25 @@ TOOL_HANDLERS = {
     "plan_approval":    lambda **kw: handle_plan_review(kw["request_id"], kw["approve"], kw.get("feedback", "")), # 处理计划审批
     "idle":             lambda **kw: "Lead does not idle.",                                             # 空闲状态（领导不空闲）
     "claim_task":       lambda **kw: TASK_MGR.claim(kw["task_id"], "lead"),                            # 认领任务
+    
+    # s18: Worktree Task Isolation tools
+    "worktree_task_create":      lambda **kw: TASKS.create(kw["subject"], kw.get("description", "")),          # 创建工作树任务
+    "worktree_task_list":        lambda **kw: TASKS.list_all(),                                                   # 列出所有工作树任务
+    "worktree_task_get":         lambda **kw: TASKS.get(kw["task_id"]),                                          # 获取工作树任务
+    "worktree_task_update":      lambda **kw: TASKS.update(kw["task_id"], kw.get("status"), kw.get("owner")),  # 更新工作树任务
+    "worktree_task_bind":        lambda **kw: TASKS.bind_worktree(kw["task_id"], kw["worktree"], kw.get("owner", "")), # 绑定工作树
+    "worktree_create":           lambda **kw: WORKTREES.create(kw["name"], kw.get("task_id"), kw.get("base_ref", "HEAD")), # 创建工作树
+    "worktree_list":             lambda **kw: WORKTREES.list_all(),                                               # 列出所有工作树
+    "worktree_enter":            lambda **kw: WORKTREES.enter(kw["name"]),                                      # 进入工作树
+    "worktree_status":           lambda **kw: WORKTREES.status(kw["name"]),                                     # 检查工作树状态
+    "worktree_run":              lambda **kw: WORKTREES.run(kw["name"], kw["command"]),                         # 在工作树中运行命令
+    "worktree_closeout":         lambda **kw: WORKTREES.closeout(kw["name"], kw["action"], kw.get("reason", ""), kw.get("force", False), kw.get("complete_task", False)), # 关闭工作树
+    "worktree_remove":           lambda **kw: WORKTREES.remove(kw["name"], kw.get("force", False), kw.get("complete_task", False), kw.get("reason", "")), # 删除工作树
+    "worktree_keep":             lambda **kw: WORKTREES.keep(kw["name"]),                                        # 保留工作树
+    "worktree_events":           lambda **kw: EVENTS.list_recent(kw.get("limit", 20)),                             # 列出工作树事件
+    
+    # s19: MCP Plugin System tools
+    "mcp_call":                  lambda **kw: mcp_router.call(kw["tool_name"], kw["arguments"]),                 # 调用MCP工具
 }
 
 # 工具定义列表
@@ -215,12 +263,57 @@ TOOLS = [
      "input_schema": {"type": "object", "properties": {}}},
     {"name": "claim_task", "description": "Claim a task from the board.",
      "input_schema": {"type": "object", "properties": {"task_id": {"type": "integer"}}, "required": ["task_id"]}},
+    
+    # s18: Worktree Task Isolation tools
+    {"name": "worktree_task_create", "description": "Create a new task for worktree isolation.",
+     "input_schema": {"type": "object", "properties": {"subject": {"type": "string"}, "description": {"type": "string"}}, "required": ["subject"]}},
+    {"name": "worktree_task_list", "description": "List all worktree tasks with status and binding.",
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "worktree_task_get", "description": "Get worktree task details by ID.",
+     "input_schema": {"type": "object", "properties": {"task_id": {"type": "integer"}}, "required": ["task_id"]}},
+    {"name": "worktree_task_update", "description": "Update worktree task status or owner.",
+     "input_schema": {"type": "object", "properties": {"task_id": {"type": "integer"}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "deleted"]}, "owner": {"type": "string"}}, "required": ["task_id"]}},
+    {"name": "worktree_task_bind", "description": "Bind a worktree task to a worktree name.",
+     "input_schema": {"type": "object", "properties": {"task_id": {"type": "integer"}, "worktree": {"type": "string"}, "owner": {"type": "string"}}, "required": ["task_id", "worktree"]}},
+    {"name": "worktree_create", "description": "Create a git worktree for isolated execution.",
+     "input_schema": {"type": "object", "properties": {"name": {"type": "string"}, "task_id": {"type": "integer"}, "base_ref": {"type": "string"}}, "required": ["name"]}},
+    {"name": "worktree_list", "description": "List all worktrees tracked in .worktrees/index.json.",
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "worktree_enter", "description": "Enter or reopen a worktree lane.",
+     "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
+    {"name": "worktree_status", "description": "Show git status for one worktree.",
+     "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
+    {"name": "worktree_run", "description": "Run a shell command in a named worktree directory.",
+     "input_schema": {"type": "object", "properties": {"name": {"type": "string"}, "command": {"type": "string"}}, "required": ["name", "command"]}},
+    {"name": "worktree_closeout", "description": "Close out a worktree by keeping or removing it.",
+     "input_schema": {"type": "object", "properties": {"name": {"type": "string"}, "action": {"type": "string", "enum": ["keep", "remove"]}, "reason": {"type": "string"}, "force": {"type": "boolean"}, "complete_task": {"type": "boolean"}}, "required": ["name", "action"]}},
+    {"name": "worktree_remove", "description": "Remove a worktree and optionally mark its task completed.",
+     "input_schema": {"type": "object", "properties": {"name": {"type": "string"}, "force": {"type": "boolean"}, "complete_task": {"type": "boolean"}, "reason": {"type": "string"}}, "required": ["name"]}},
+    {"name": "worktree_keep", "description": "Mark a worktree as kept without removing it.",
+     "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
+    {"name": "worktree_events", "description": "List recent worktree lifecycle events.",
+     "input_schema": {"type": "object", "properties": {"limit": {"type": "integer"}}}},
+    
+    # s19: MCP Plugin System tools
+    {"name": "mcp_call", "description": "Call an MCP tool from an external server.",
+     "input_schema": {"type": "object", "properties": {"tool_name": {"type": "string"}, "arguments": {"type": "object"}}, "required": ["tool_name", "arguments"]}},
 ]
 
 
 # === SECTION: repl ===
 # 主程序入口
 if __name__ == "__main__":
+    # s19: 扫描插件并连接MCP服务器
+    found_plugins = plugin_loader.scan()
+    if found_plugins:
+        print(f"[Plugins loaded: {', '.join(found_plugins)}]")
+        for server_name, config in plugin_loader.get_mcp_servers().items():
+            mcp_client = MCPClient(server_name, config.get("command", ""), config.get("args", []))
+            if mcp_client.connect():
+                mcp_client.list_tools()
+                mcp_router.register_client(mcp_client)
+                print(f"[MCP] Connected to {server_name}")
+    
     # 初始化历史消息列表
     history = []
     while True:
@@ -251,9 +344,25 @@ if __name__ == "__main__":
         if query.strip() == "/inbox":
             print(json.dumps(BUS.read_inbox("lead"), indent=2))
             continue
+        # 处理 /worktree 命令：列出所有工作树
+        if query.strip() == "/worktree":
+            print(WORKTREES.list_all())
+            continue
+        # 处理 /mcp 命令：列出所有MCP服务器和工具
+        if query.strip() == "/mcp":
+            if mcp_router.clients:
+                for name, c in mcp_router.clients.items():
+                    tools = c.get_agent_tools()
+                    print(f"  {name}: {len(tools)} tools")
+            else:
+                print("  (no MCP servers connected)")
+            continue
         # 添加用户输入到历史消息
         history.append({"role": "user", "content": query})
         # 运行代理循环
         agent_loop(client, MODEL, history, TODO, BG, BUS, TOOL_HANDLERS, TOOLS, SYSTEM)
         # 打印空行
         print()
+    
+    # 清理MCP连接
+    mcp_router.disconnect_all()
