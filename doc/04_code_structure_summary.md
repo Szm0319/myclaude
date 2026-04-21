@@ -101,12 +101,75 @@ TOOL_HANDLERS = {
 管理层是系统的大脑，负责管理各种资源和状态。
 
 **主要管理器**：
-- **任务管理器**：管理任务的创建、更新、状态变化
-- **团队管理器**：管理团队成员的生成、状态、通信
-- **后台管理器**：管理后台任务的运行和结果
-- **消息总线**：处理团队成员之间的通信
-- **待办管理器**：管理待办事项的状态和更新
-- **技能加载器**：加载和管理技能
+- **任务管理器**：管理任务的创建、更新、状态变化（实现：[task_manager.py](file:///workspace/src/modules/task_manager.py)）
+- **团队管理器**：管理团队成员的生成、状态、通信（实现：[team.py](file:///workspace/src/modules/team.py)）
+- **后台管理器**：管理后台任务的运行和结果（实现：[background.py](file:///workspace/src/modules/background.py)）
+- **消息总线**：处理团队成员之间的通信（实现：[messaging.py](file:///workspace/src/modules/messaging.py)）
+- **待办管理器**：管理待办事项的状态和更新（实现：[todos.py](file:///workspace/src/modules/todos.py)）
+- **技能加载器**：加载和管理技能（实现：[skills.py](file:///workspace/src/modules/skills.py)）
+
+**任务的详细字段**：
+每个任务文件（路径：`.tasks/task_{id}.json`）包含以下字段：
+- `id`：任务唯一标识符
+- `subject`：任务主题
+- `description`：任务描述
+- `status`：任务状态（`pending`/`in_progress`/`completed`/`deleted`）
+- `owner`：任务所有者（团队成员名称）
+- `blockedBy`：被哪些任务阻塞（任务 ID 列表）
+- `blocks`：阻塞哪些任务（任务 ID 列表）
+
+**示例任务文件**：
+```json
+{
+  "id": 1,
+  "subject": "创建前端页面",
+  "description": "创建一个包含登录和注册功能的前端页面",
+  "status": "in_progress",
+  "owner": "frontend_dev",
+  "blockedBy": [],
+  "blocks": [2]
+}
+```
+
+**信箱的消息示例**：
+团队成员的信箱文件（路径：`.team/inbox/{name}.jsonl`）包含以下格式的消息：
+```json
+{"type": "message", "from": "lead", "content": "请创建一个前端页面", "timestamp": 1620000000}
+{"type": "shutdown_request", "from": "lead", "content": "请关闭", "timestamp": 1620000000, "request_id": "abc123"}
+```
+
+**如何处理有消息的情况**：
+1. **主代理处理消息**：
+   - 主循环定期检查领导信箱（`.team/inbox/lead.jsonl`）
+   - 读取所有消息并清空信箱
+   - 将消息添加到对话历史中
+   - Claude 会分析消息并决定如何响应
+
+2. **团队成员处理消息**：
+   - 团队成员在工作阶段开始时读取自己的信箱
+   - 处理不同类型的消息：
+     - `message`：普通消息，添加到对话历史
+     - `shutdown_request`：关闭请求，处理后关闭
+     - `plan_approval_response`：计划审批响应，处理审批结果
+   - 对消息做出相应的操作
+
+**示例**：
+```python
+# 主代理检查信箱
+inbox = BUS.read_inbox("lead")
+if inbox:
+    # 添加到对话历史
+    messages.append({"role": "user", "content": f"<inbox>{json.dumps(inbox, indent=2)}</inbox>"})
+    messages.append({"role": "assistant", "content": "Noted inbox messages."})
+
+# 团队成员处理消息
+inbox = self.bus.read_inbox(name)
+for msg in inbox:
+    if msg.get("type") == "shutdown_request":
+        self._set_status(name, "shutdown")
+        return
+    messages.append({"role": "user", "content": json.dumps(msg)})
+```
 
 **管理器的工作方式**：
 1. 工具调用管理器的方法
